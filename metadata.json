@@ -1,0 +1,5 @@
+{
+  "name": "Extracteur BL Intelligent",
+  "description": "Application d'OCR zonal pour extraire les données de Bons de Livraison (BL) via des modèles personnalisés et exporter en JSON.",
+  "requestFramePermissions": []
+}
