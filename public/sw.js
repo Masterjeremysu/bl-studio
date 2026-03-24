@@ -1,45 +1,23 @@
-const CACHE = 'bl-studio-v2';
-const STATIC = ['/', '/index.html'];
+// Version auto-incrémentée à chaque déploiement Vercel via la variable d'env
+const CACHE = 'bl-studio-' + (self.registration?.scope || Date.now());
 
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(STATIC)));
+self.addEventListener('install', () => {
+  // Prend le contrôle immédiatement sans attendre
   self.skipWaiting();
 });
 
 self.addEventListener('activate', e => {
+  // Supprime TOUS les anciens caches au démarrage
   e.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    )
+      Promise.all(keys.map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
+// On ne cache RIEN — pas besoin pour une app Vercel toujours en ligne
+// Le SW sert juste pour le manifest PWA (installable)
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
-  // Ne jamais intercepter les appels API externes
-  if (e.request.url.includes('googleapis.com')) return;
-  if (e.request.url.includes('googleusercontent.com')) return;
-
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(res => {
-        // Ne cacher que les ressources du même origin et les réponses valides
-        if (
-          res.ok &&
-          res.status === 200 &&
-          res.type !== 'opaque' &&
-          e.request.url.startsWith(self.location.origin)
-        ) {
-          const resClone = res.clone();
-          caches.open(CACHE).then(c => c.put(e.request, resClone));
-        }
-        return res;
-      }).catch(() => {
-        if (cached) return cached;
-        return new Response('Offline', { status: 503 });
-      });
-    })
-  );
+  // Laisse passer toutes les requêtes normalement
+  return;
 });
