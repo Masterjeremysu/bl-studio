@@ -112,7 +112,7 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
     // Utilise une image réduite pour l'identification = beaucoup moins de tokens
     const smallBase64 = await resizeBase64(base64, 800);
     const res = await withRetry(() => ai.models.generateContent({
-      model: 'gemini-2.0-flash-lite',
+      model: 'gemini-2.5-flash',
       contents: [
         { text: `Identifie le fournisseur parmi : ${names.join(', ')}. Réponds INCONNU si absent.` },
         { inlineData: { data: smallBase64.split(',')[1], mimeType: 'image/jpeg' } },
@@ -138,7 +138,7 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
     const props: any = {};
     template.zones.forEach(z => { props[z.label] = { type: Type.STRING }; });
     const res = await withRetry(() => ai.models.generateContent({
-      model: 'gemini-2.0-flash-lite',
+      model: 'gemini-2.5-flash',
       contents: { parts },
       config: {
         responseMimeType: 'application/json',
