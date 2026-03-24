@@ -80,7 +80,7 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
   const identifySupplier = async (base64: string): Promise<string> => {
     const names = templates.map(t => t.supplierName);
     const res = await withRetry(() => ai.models.generateContent({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.0-flash-lite',
       contents: [
         { text: `Identifie le fournisseur parmi : ${names.join(', ')}. Réponds INCONNU si absent.` },
         { inlineData: { data: base64.split(',')[1], mimeType: 'image/jpeg' } },
@@ -106,7 +106,7 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
     const props: any = {};
     template.zones.forEach(z => { props[z.label] = { type: Type.STRING }; });
     const res = await withRetry(() => ai.models.generateContent({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.0-flash-lite',
       contents: { parts },
       config: {
         responseMimeType: 'application/json',
