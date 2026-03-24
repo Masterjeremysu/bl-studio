@@ -2,13 +2,16 @@ import React, { useState, useCallback } from 'react';
 import { Template, Zone, ExtractionResult, BatchItem, ProcessingStatus } from '../types';
 import { convertAllPagesToBase64 } from '../lib/pdf';
 import { exportToJSON, exportToCSV } from '../lib/utils';
-import { useDropzone } from 'react-dropzone';
+import { useDropzone } from 'react-dropzone'
 import { GoogleGenAI, Type } from '@google/genai';
 import { v4 as uuidv4 } from 'uuid';
 import { useToast } from './Toast';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MAX_RETRIES = 3;
+
+// BUG FIX 1 : MAX_RETRIES était 3 → sur un 429, ça faisait 3 appels d'affilée
+// On met 1 seul retry, uniquement sur erreur réseau, JAMAIS sur 429
+const MAX_RETRIES = 1;
 
 interface Props {
   templates: Template[];
@@ -29,21 +32,48 @@ const cropImage = (imageSrc: string, zone: Zone): Promise<string> =>
       const sh = (zone.height / 100) * img.naturalHeight;
       canvas.width = sw; canvas.height = sh;
       ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-      resolve(canvas.toDataURL('image/jpeg', 0.9));
+      resolve(canvas.toDataURL('image/jpeg', 0.85)); // BUG FIX 2 : 0.9 → 0.85 = images plus légères = moins de tokens
     };
     img.onerror = reject;
     img.src = imageSrc;
   });
 
+// BUG FIX 3 : withRetry ne relance PAS sur les erreurs 429 (quota)
 async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
-  for (let i = 0; i < retries; i++) {
-    try { return await fn(); }
-    catch (e) {
-      if (i === retries - 1) throw e;
-      await new Promise(r => setTimeout(r, 800 * (i + 1)));
+  for (let i = 0; i < retries + 1; i++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      // Ne jamais retenter sur quota dépassé
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+        throw new Error('Quota API dépassé — réessayez demain ou vérifiez votre clé.');
+      }
+      if (i === retries) throw e;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
   throw new Error('Max retries reached');
+}
+
+// BUG FIX 4 : l'image principale envoyée à identifySupplier était en base64 JPEG haute résolution (2x scale)
+// On la réduit à la taille normale pour l'identification (pas besoin de haute résolution pour identifier le fournisseur)
+async function resizeBase64(base64: string, maxWidth = 800): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth <= maxWidth) { resolve(base64); return; }
+      const ratio = maxWidth / img.naturalWidth;
+      const canvas = document.createElement('canvas');
+      canvas.width = maxWidth;
+      canvas.height = Math.round(img.naturalHeight * ratio);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = () => resolve(base64);
+    img.src = base64;
+  });
 }
 
 const STATUS_LABELS: Record<ProcessingStatus, string> = {
@@ -79,11 +109,13 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
 
   const identifySupplier = async (base64: string): Promise<string> => {
     const names = templates.map(t => t.supplierName);
+    // Utilise une image réduite pour l'identification = beaucoup moins de tokens
+    const smallBase64 = await resizeBase64(base64, 800);
     const res = await withRetry(() => ai.models.generateContent({
       model: 'gemini-2.0-flash-lite',
       contents: [
         { text: `Identifie le fournisseur parmi : ${names.join(', ')}. Réponds INCONNU si absent.` },
-        { inlineData: { data: base64.split(',')[1], mimeType: 'image/jpeg' } },
+        { inlineData: { data: smallBase64.split(',')[1], mimeType: 'image/jpeg' } },
       ],
       config: {
         responseMimeType: 'application/json',
@@ -139,9 +171,19 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
         updateItem(item.id, { result, status: 'success', processedAt: Date.now() });
         onStatsUpdate(true);
         toast(`✓ ${item.file.name}`, 'success');
+
+        // Petite pause entre chaque fichier pour ne pas saturer le rate limit
+        await new Promise(r => setTimeout(r, 500));
+
       } catch (err) {
-        updateItem(item.id, { status: 'error', error: err instanceof Error ? err.message : String(err) });
+        const msg = err instanceof Error ? err.message : String(err);
+        updateItem(item.id, { status: 'error', error: msg });
         onStatsUpdate(false);
+        // Si c'est un quota, on arrête tout le lot immédiatement
+        if (msg.includes('Quota') || msg.includes('429')) {
+          toast('Quota API dépassé — traitement arrêté', 'error');
+          break;
+        }
       }
     }
     setIsProcessing(false);
@@ -154,7 +196,6 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
 
   return (
     <div className="page-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
       <div style={{ padding: '12px 20px', background: 'var(--bg2)', borderBottom: '1px solid var(--border)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <button className="btn btn-ghost btn-icon" onClick={onBack}>←</button>
@@ -184,7 +225,6 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
         </div>
       </div>
 
-      {/* Progress bar */}
       {isProcessing && (
         <div className="progress-bar" style={{ borderRadius: 0, height: 3 }}>
           <div className="progress-fill" style={{ width: `${progress}%` }} />
@@ -192,7 +232,6 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
       )}
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {/* Left: file list */}
         <div style={{ width: '40%', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`} style={{ margin: 12, minHeight: 90, padding: 16, gap: 8, flex: '0 0 auto' }}>
             <input {...getInputProps()} />
@@ -241,7 +280,6 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
           </div>
         </div>
 
-        {/* Right: result preview */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16, background: 'var(--bg)' }}>
           {selected?.status === 'success' && selected.result ? (
             <ResultCard item={selected} templates={templates} />
@@ -266,12 +304,12 @@ export default function Extractor({ templates, onBack, onStatsUpdate }: Props) {
 
 function StatusIcon({ status }: { status: ProcessingStatus }) {
   const styles: Record<ProcessingStatus, { bg: string; color: string; icon: React.ReactNode }> = {
-    pending:    { bg: 'var(--bg3)',                     color: 'var(--muted)',   icon: '○' },
-    converting: { bg: 'rgba(74,158,255,0.1)',           color: 'var(--accent)',  icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
-    identifying:{ bg: 'rgba(74,158,255,0.1)',           color: 'var(--accent)',  icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
-    extracting: { bg: 'rgba(201,169,110,0.12)',         color: 'var(--gold)',    icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
-    success:    { bg: 'rgba(60,193,122,0.12)',          color: 'var(--success)', icon: '✓' },
-    error:      { bg: 'rgba(226,88,88,0.10)',           color: 'var(--error)',   icon: '✕' },
+    pending:     { bg: 'var(--bg3)',               color: 'var(--muted)',   icon: '○' },
+    converting:  { bg: 'rgba(74,158,255,0.1)',     color: 'var(--accent)',  icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
+    identifying: { bg: 'rgba(74,158,255,0.1)',     color: 'var(--accent)',  icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
+    extracting:  { bg: 'rgba(201,169,110,0.12)',   color: 'var(--gold)',    icon: <span className="spin" style={{ display:'inline-block' }}>⟳</span> },
+    success:     { bg: 'rgba(60,193,122,0.12)',    color: 'var(--success)', icon: '✓' },
+    error:       { bg: 'rgba(226,88,88,0.10)',     color: 'var(--error)',   icon: '✕' },
   };
   const s = styles[status];
   return (
@@ -292,7 +330,7 @@ function ResultCard({ item, templates, compact }: { item: BatchItem; templates: 
         </div>
         <span className="pill gold" style={{ marginLeft: 8, flexShrink: 0 }}>{supplier}</span>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : '1fr 1fr', gap: compact ? '6px 12px' : '8px 16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: compact ? '6px 12px' : '8px 16px' }}>
         {entries.map(([key, value]) => (
           <div key={key}>
             <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>{key}</div>
